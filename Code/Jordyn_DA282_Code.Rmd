@@ -1,0 +1,619 @@
+---
+title: "Time-To-Legalization"
+output: html_document
+date: "2025-12-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+```
+
+-create time-to-legalization (see the minimum number of months available and match)  and time-after-legalization (maybe the month after or the same?)
+-are there changes in average interest leading up to legalization?
+	-online vs. retail vs. both
+-are there changes in average interest post legalization?
+	-online vs. retail vs. both
+	
+# 1. Uploading and Inspecting Data
+
+```{r}
+data <- read_csv("Full_Dataset.csv")
+```
+
+# 2. Creating a subset of only legal states 
+
+```{r}
+legal_states <- data %>%
+  filter(Legal_Status == 1)
+head(legal_states)
+
+unique(legal_states$Legal_Status) # checking that it worked
+```
+
+
+```{r}
+# counting the number of months of data leading up to legalization
+legal_states <- legal_states %>%
+  group_by(State) %>%
+  mutate(time_to_legalization = sum(Pre_Launch)) %>%
+  ungroup()
+
+summary(legal_states$time_to_legalization)
+
+legal_states %>% 
+  distinct(State, time_to_legalization)
+```
+
+Nevada had legalization of sports betting before the data points begin, so its time_to_legalization is zero and will not be included in our analysis. The Median time_to_legalization is 41 with an average of 47, meaning we have data for states on average 47 months before their legalization of sports betting. 
+
+```{r}
+# fixing date variable
+legal_states <- legal_states %>%
+  mutate(Date = as.Date(Date, format = "%m/%d/%Y"))
+
+# finding legalization date which will just be the minimum Post_Launch date
+legal_states <- legal_states %>%
+  group_by(State) %>%
+  arrange(Date) %>%
+  mutate(
+    legalization_date = min(Date[Post_Launch == 1], na.rm = TRUE),
+    # backward count of Pre_Launch months
+    months_before = ifelse(
+      Pre_Launch == 1,
+      rev(seq_len(sum(Pre_Launch))),  # reversed running count
+      NA
+    )
+  ) %>%
+  ungroup()
+```
+
+
+```{r}
+# creating months after variable
+legal_states <- legal_states %>%
+  group_by(State) %>%
+  arrange(Date) %>%
+  mutate(
+    # months_before as before
+    months_before = ifelse(
+      Pre_Launch == 1,
+      rev(seq_len(sum(Pre_Launch))),
+      NA
+    ),
+    months_after = ifelse(
+      Post_Launch == 1,
+      cumsum(Post_Launch == 1),
+      NA
+    )
+  ) %>%
+  ungroup()
+```
+
+
+# 3. Preliminary Summary Statistics
+
+```{r}
+# overall interest
+legal_states %>%
+  summarise(
+    mean_interest = mean(Interest, na.rm = TRUE),
+    median_interest = median(Interest, na.rm = TRUE),
+    sd_interest = sd(Interest, na.rm = TRUE)
+  )
+```
+
+The mean/median interest is around 55/100 with the standard deviation being 17.2, a fairly large range. 
+
+```{r}
+# by pre/post legalization
+legal_states %>%
+  group_by(Pre_Launch, Post_Launch) %>%
+  summarise(mean_interest = mean(Interest, na.rm = TRUE),
+            sd_interest = sd(Interest, na.rm = TRUE),
+            n = n())
+```
+
+Surprisingly, Pre_Launch interest appears to be larger (61.15) than Post_Lauch interest (51.34). Of course, this is very high level and does not consider the panel structure of the data, so we don't see all of the differences across states or time. 
+
+
+```{r}
+# by online/retail/both
+legal_states %>%
+  group_by(Online, Retail) %>%
+  summarise(mean_interest = mean(Interest, na.rm = TRUE))
+```
+
+These are all very similar, although online and retail interest appears slightly. We'll do these calculations again, but with a specific window pre- and post- legalization. We'll start with 2 years for each. 
+
+# 4. Making a set window
+
+```{r}
+window_months <- 24 # 2 years
+
+legal_states_window <- legal_states %>%
+  filter((!is.na(months_before) & months_before <= window_months) |
+         (!is.na(months_after) & months_after <= window_months))
+
+# keeping only states with exactly 2 years of data pre and post legalization
+state_counts <- legal_states_window %>%
+  group_by(State) %>%
+  summarise(
+    pre_months  = sum(!is.na(months_before) & months_before <= 24),
+    post_months = sum(!is.na(months_after)  & months_after <= 24)
+  )
+
+valid_states <- state_counts %>%
+  filter(pre_months == 24 & post_months == 24) %>%
+  pull(State)
+
+legal_states_window <- legal_states_window %>%
+  filter(State %in% valid_states,
+         (months_before <= 24 & !is.na(months_before)) |
+         (months_after  <= 24 & !is.na(months_after)))
+
+# checking
+legal_states_window %>%
+  group_by(State) %>%
+  summarise(
+    pre_months  = sum(!is.na(months_before)),
+    post_months = sum(!is.na(months_after))
+  )
+
+```
+
+We have 28 total states to analyze within this 2 year window pre and post legalization. 
+
+# 5. Descriptive and Comparative Analysis with 2-year Window
+
+```{r}
+# computing average pre- and post-legalization interest for each of the 28 states
+state_summary <- legal_states_window %>%
+  group_by(State) %>%
+  summarise(
+    pre_avg  = mean(Interest[!is.na(months_before)], na.rm = TRUE),
+    post_avg = mean(Interest[!is.na(months_after)], na.rm = TRUE)
+  )
+
+state_summary
+```
+
+These averages are all over the place, but it seems that in a lot of the cases, the pre_avg is higher than the post_avg (WA, MI, NH, IN, IL, IA, AR are ones of note) with some states like WI and NE having nearly identical pre and post averages. To test whether there is a difference, we'll do a paired t-test (state-level). 
+
+```{r}
+# t-test for differences
+t.test(state_summary$pre_avg, state_summary$post_avg, paired = TRUE)
+```
+
+These results show that on average, the pre-legalization average interest is about 5.20 interest points higher than the post-legalization average, an interesting result. With that, it has a confidence interval of 1.80 to 8.60, meaning the difference ranges anywhere from those values. 
+
+```{r}
+state_summary_long <- state_summary %>%
+  pivot_longer(cols = c(pre_avg, post_avg), names_to = "Period", values_to = "Interest")
+
+ggplot(state_summary_long, aes(x = Period, y = Interest)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  labs(title = "Distribution of Interest Pre & Post Legalization") +
+  theme(plot.title = element_text(size = 12))
+```
+
+Pre-legalization interest seems to have a much larger spread, with a higher median interest compared to post-legalization interests, supporting our findings from the paired t-test. We will now view this as a time-series visual. 
+
+```{r}
+monthly_trends <- legal_states_window %>%
+  mutate(relative_month = ifelse(!is.na(months_before), -months_before, months_after)) %>%
+  group_by(relative_month) %>%
+  summarise(mean_interest = mean(Interest, na.rm = TRUE))
+
+monthly_trends <- monthly_trends %>%
+  mutate(Period = ifelse(relative_month < 0, "Pre-Legalization", "Post-Legalization"))
+
+p <- ggplot(monthly_trends, aes(x = relative_month, y = mean_interest, color = Period)) +
+  geom_line(size = 1) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = c("Pre-Legalization" = "blue", "Post-Legalization" = "red")) +
+  labs(
+    x = "Months Relative to Legalization",
+    y = "Average Interest"
+  ) +
+  annotate("text", x = -6, y = max(monthly_trends$mean_interest), label = "Pre-Legalization", hjust = 1.1, size = 3, color = "blue") +
+  annotate("text", x = 6, y = max(monthly_trends$mean_interest), label = "Post-Legalization", hjust = -0.1, size = 3, color = "red") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+ggsave("line_plot.png", plot = p, width = 6, height = 4, dpi = 300)
+```
+
+Overall, average interest appears to decrease over time with larger combined averages occurring in the months of pre-legalization. However, there does appear to be a spike in interest just after post-legalization. 
+
+# 6. Checking Pre- and Post- differences in a smaller window (shock)
+
+```{r}
+window_months <- 6 # 6 months
+
+legal_states_window <- legal_states %>%
+  filter((!is.na(months_before) & months_before <= window_months) |
+         (!is.na(months_after) & months_after <= window_months))
+
+# keeping only states with exactly 2 years of data pre and post legalization
+state_counts <- legal_states_window %>%
+  group_by(State) %>%
+  summarise(
+    pre_months  = sum(!is.na(months_before) & months_before <= 6),
+    post_months = sum(!is.na(months_after)  & months_after <= 6)
+  )
+
+valid_states <- state_counts %>%
+  filter(pre_months == 6 & post_months == 6) %>%
+  pull(State)
+
+legal_states_window <- legal_states_window %>%
+  filter(State %in% valid_states,
+         (months_before <= 6 & !is.na(months_before)) |
+         (months_after  <= 6 & !is.na(months_after)))
+
+# checking
+legal_states_window %>%
+  group_by(State) %>%
+  summarise(
+    pre_months  = sum(!is.na(months_before)),
+    post_months = sum(!is.na(months_after))
+  )
+
+# computing average pre- and post-legalization interest for each of the 28 states
+state_summary <- legal_states_window %>%
+  group_by(State) %>%
+  summarise(
+    pre_avg  = mean(Interest[!is.na(months_before)], na.rm = TRUE),
+    post_avg = mean(Interest[!is.na(months_after)], na.rm = TRUE)
+  )
+
+state_summary
+```
+
+This looks promising!
+
+```{r}
+monthly_trends <- legal_states_window %>%
+  mutate(relative_month = ifelse(!is.na(months_before), -months_before, months_after)) %>%
+  group_by(relative_month) %>%
+  summarise(mean_interest = mean(Interest, na.rm = TRUE))
+
+monthly_trends <- monthly_trends %>%
+  mutate(Period = ifelse(relative_month < 0, "Pre-Legalization", "Post-Legalization"))
+
+ggplot(monthly_trends, aes(x = relative_month, y = mean_interest, color = Period)) +
+  geom_line(size = 1) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = c("Pre-Legalization" = "blue", "Post-Legalization" = "red")) +
+  labs(
+    title = "Interest Relative to Legalization",
+    x = "Months Relative to Legalization",
+    y = "Average Interest"
+  ) +
+  annotate("text", x = -2, y = max(monthly_trends$mean_interest), label = "Pre-Legalization", hjust = 1.1, size = 3, color = "blue") +
+  annotate("text", x = 2, y = max(monthly_trends$mean_interest), label = "Post-Legalization", hjust = -0.1, size = 3, color = "red") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+There seems to be a very large spike in interest right at the first month post legalization, then a sharp decline. So, we'll aggregate down to 2 months pre and post. 
+
+
+```{r}
+window_months <- 2 # 2 months
+
+legal_states_window <- legal_states %>%
+  filter((!is.na(months_before) & months_before <= window_months) |
+         (!is.na(months_after) & months_after <= window_months))
+
+# keeping only states with exactly 2 years of data pre and post legalization
+state_counts <- legal_states_window %>%
+  group_by(State) %>%
+  summarise(
+    pre_months  = sum(!is.na(months_before) & months_before <= 2),
+    post_months = sum(!is.na(months_after)  & months_after <= 2)
+  )
+
+valid_states <- state_counts %>%
+  filter(pre_months == 2 & post_months == 2) %>%
+  pull(State)
+
+legal_states_window <- legal_states_window %>%
+  filter(State %in% valid_states,
+         (months_before <= 2 & !is.na(months_before)) |
+         (months_after  <= 2 & !is.na(months_after)))
+
+# checking
+legal_states_window %>%
+  group_by(State) %>%
+  summarise(
+    pre_months  = sum(!is.na(months_before)),
+    post_months = sum(!is.na(months_after))
+  )
+
+# computing average pre- and post-legalization interest for each of the 28 states
+state_summary <- legal_states_window %>%
+  group_by(State) %>%
+  summarise(
+    pre_avg  = mean(Interest[!is.na(months_before)], na.rm = TRUE),
+    post_avg = mean(Interest[!is.na(months_after)], na.rm = TRUE)
+  )
+
+state_summary
+```
+
+```{r}
+# aggregate by pre/post
+monthly_trends_bar <- monthly_trends %>%
+  group_by(Period) %>%
+  summarise(mean_interest = mean(mean_interest, na.rm = TRUE))
+
+# bar plot instead of line
+ggplot(monthly_trends_bar, aes(x = Period, y = mean_interest, fill = Period)) +
+  geom_col(width = 0.5) +
+  scale_fill_manual(values = c("Pre-Legalization" = "blue", "Post-Legalization" = "red")) +
+  labs(
+    title = "Average Interest Pre vs Post Legalization",
+    x = "",
+    y = "Average Interest"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 10))
+
+```
+
+Let's now do another paired, state-level t-test to check for differences. 
+
+```{r}
+state_summary_small <- legal_states_window %>%
+  mutate(Period = ifelse(!is.na(months_before), "Pre", "Post")) %>%
+  group_by(State, Period) %>%
+  summarise(mean_interest = mean(Interest, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = Period, values_from = mean_interest)
+
+state_summary_small
+```
+
+```{r}
+# ttest
+t_test_small <- t.test(state_summary_small$Pre, state_summary_small$Post, paired = TRUE)
+
+t_test_small
+```
+
+Unlike our 2-year window, the t-test yielded statistically insignificant results, suggesting no true difference in pre and post average interest across states. We will now just look at one-month to see if it is a more immediate shock to interest. 
+
+```{r}
+window_months <- 1 # 1 month
+
+legal_states_window <- legal_states %>%
+  filter((!is.na(months_before) & months_before <= window_months) |
+         (!is.na(months_after) & months_after <= window_months))
+
+# keeping only states with exactly 1 month of data pre and post legalization
+state_counts <- legal_states_window %>%
+  group_by(State) %>%
+  summarise(
+    pre_months  = sum(!is.na(months_before) & months_before <= 1),
+    post_months = sum(!is.na(months_after)  & months_after <= 1)
+  )
+
+valid_states <- state_counts %>%
+  filter(pre_months == 1 & post_months == 1) %>%
+  pull(State)
+
+legal_states_window <- legal_states_window %>%
+  filter(State %in% valid_states,
+         (months_before <= 1 & !is.na(months_before)) |
+         (months_after  <= 1 & !is.na(months_after)))
+
+# checking
+legal_states_window %>%
+  group_by(State) %>%
+  summarise(
+    pre_months  = sum(!is.na(months_before)),
+    post_months = sum(!is.na(months_after))
+  )
+
+# computing average pre- and post-legalization interest for each of the 28 states
+state_summary <- legal_states_window %>%
+  group_by(State) %>%
+  summarise(
+    pre_avg  = mean(Interest[!is.na(months_before)], na.rm = TRUE),
+    post_avg = mean(Interest[!is.na(months_after)], na.rm = TRUE)
+  )
+
+state_summary
+```
+
+```{r}
+state_summary_small <- legal_states_window %>%
+  mutate(Period = ifelse(!is.na(months_before), "Pre", "Post")) %>%
+  group_by(State, Period) %>%
+  summarise(mean_interest = mean(Interest, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = Period, values_from = mean_interest)
+
+state_summary_small <- state_summary_small %>%
+  mutate(diff = Post - Pre)
+
+
+state_summary_small
+
+# ttest
+t_test_small <- t.test(state_summary_small$Pre, state_summary_small$Post, paired = TRUE)
+
+t_test_small
+```
+
+This is insignifant. Although, it does not account for state-level differences, and the aggregation definitely hides some trends.
+(used ChatGPT for the following graph to make more readable)
+
+```{r}
+library(forcats)
+
+state_summary_small_long <- state_summary_small %>%
+  pivot_longer(cols = c(Pre, Post), names_to = "Period", values_to = "Interest") %>%
+  mutate(
+    Period = factor(Period, levels = c("Pre", "Post")),  # ensures Pre is on left
+    State = fct_reorder(State, diff)                    # reorder states by Post-Pre difference
+  )
+
+
+ggplot(state_summary_small_long, aes(x = Period, y = Interest, group = State)) +
+  geom_line(alpha = 0.3, color = "gray") +       # faint line connecting pre/post
+  geom_point(aes(color = Period), size = 2) +    # color-coded points
+  scale_color_manual(values = c("Pre" = "blue", "Post" = "red")) +
+  labs(
+    title = "State-Level Pre vs Post Interest (1 Month)",
+    y = "Average Interest",
+    x = ""
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+We will now rank the states with the largest pre and post change
+
+```{r}
+top_spike_states <- state_summary_small %>%
+  mutate(diff = Post - Pre) %>%
+  arrange(desc(diff)) %>%
+  head(10)  # top 10 
+
+top_spike_states
+```
+
+```{r}
+state_summary_small <- state_summary_small %>%
+  mutate(diff = Post - Pre)
+
+# top 10 increasing states
+top_increase <- state_summary_small %>%
+  arrange(desc(diff)) %>%
+  head(10)
+
+# top 10 decreasing states
+top_decrease <- state_summary_small %>%
+  arrange(diff) %>%
+  head(10)
+
+# remaining 8 states are relatively stable (smallest absolute diff)
+stable_states <- state_summary_small %>%
+  filter(!State %in% c(top_increase$State, top_decrease$State)) %>%
+  arrange(abs(diff))  # sort by smallest absolute change
+```
+
+```{r}
+top_increase_long <- top_increase %>%
+  pivot_longer(cols = c(Pre, Post), names_to = "Period", values_to = "Interest") %>%
+  mutate(
+    Period = factor(Period, levels = c("Pre", "Post")),
+    State = fct_reorder(State, diff)
+  )
+
+ggplot(top_increase_long, aes(x = Period, y = Interest, group = State)) +
+  geom_line(aes(color = State), size = 1) +
+  geom_point(aes(color = State), size = 3) +
+  labs(
+    title = "Top 10 States with Largest Post-Legalization Spike",
+    y = "Average Interest",
+    x = ""
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+```
+
+
+```{r}
+top_decrease_long <- top_decrease %>%
+  pivot_longer(cols = c(Pre, Post), names_to = "Period", values_to = "Interest") %>%
+  mutate(
+    Period = factor(Period, levels = c("Pre", "Post")),
+    State = fct_reorder(State, diff)
+  )
+
+ggplot(top_decrease_long, aes(x = Period, y = Interest, group = State)) +
+  geom_line(aes(color = State), size = 1) +
+  geom_point(aes(color = State), size = 3) +
+  labs(
+    title = "Top 10 States with Largest Post-Legalization Decrease",
+    y = "Average Interest",
+    x = ""
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+```
+
+
+```{r}
+stable_states_long <- stable_states %>%
+  pivot_longer(cols = c(Pre, Post), names_to = "Period", values_to = "Interest") %>%
+  mutate(
+    Period = factor(Period, levels = c("Pre", "Post")),
+    State = fct_reorder(State, diff)
+  )
+
+ggplot(stable_states_long, aes(x = Period, y = Interest, group = State)) +
+  geom_line(aes(color = State), size = 1) +
+  geom_point(aes(color = State), size = 3) +
+  labs(
+    title = "States with Relatively Stable Interest Post-Legalization",
+    y = "Average Interest",
+    x = ""
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+```
+
+```{r}
+state_summary_small %>%
+  mutate(Group = case_when(
+    State %in% top_increase$State ~ "Top Increase",
+    State %in% top_decrease$State ~ "Top Decrease",
+    TRUE ~ "Stable"
+  )) %>%
+  arrange(desc(diff)) %>%
+  select(State, Pre, Post, diff, Group)
+
+```
+
+```{r}
+# Calculate overall Pre/Post averages for legal states
+legal_avg <- state_summary_small %>%
+  summarize(
+    Pre = mean(Pre, na.rm = TRUE),
+    Post = mean(Post, na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = c(Pre, Post),
+               names_to = "Period",
+               values_to = "Interest") %>%
+  mutate(
+    Period = factor(Period, levels = c("Pre", "Post"))
+  )
+
+# Plot
+ggplot(legal_avg, aes(x = Period, y = Interest, group = 1)) +
+  geom_line(size = 1.2, color = "#e52534") +  # one clean line
+  geom_point(size = 4, color = "#e52534") +  # larger points
+  labs(
+    title = "Avg. Pre & Post Interest For Legal States",
+    caption = "Linear Regression showed no statistically significant difference.",
+    y = "Average Interest",
+    x = ""
+  ) +
+  theme_minimal() +
+  theme(plot.caption = element_text(size = 9, hjust = 0.5)
+  )+ scale_y_continuous(limits = c(0, 100))
+
+```
